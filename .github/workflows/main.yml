@@ -17,24 +17,17 @@ jobs:
         run: |
           mkdir -p include lib
           if [ ! -f "include/dobby.h" ] || [ ! -f "lib/libdobby.a" ]; then
-            curl -fL https://github.com/jmpews/Dobby/releases/latest/download/dobby-ios-arm64.tar.gz -o dobby.tar.gz || true
-            if [ -s dobby.tar.gz ] && tar -tzf dobby.tar.gz >/dev/null 2>&1; then
-              tar -xzf dobby.tar.gz -C /tmp
-              find /tmp -name "dobby.h" -exec cp {} include/dobby.h \;
-              find /tmp -name "libdobby.a" -exec cp {} lib/libdobby.a \;
-            else
-              git clone --depth 1 https://github.com/jmpews/Dobby.git /tmp/dobby-src
-              cmake -S /tmp/dobby-src -B /tmp/dobby-build \
-                -DCMAKE_SYSTEM_NAME=iOS \
-                -DCMAKE_SYSTEM_PROCESSOR=arm64 \
-                -DCMAKE_OSX_ARCHITECTURES=arm64 \
-                -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
-                -DDOBBY_BUILD_EXAMPLE=OFF \
-                -DDOBBY_BUILD_TEST=OFF
-              cmake --build /tmp/dobby-build --config Release -j4
-              cp /tmp/dobby-src/include/dobby.h include/dobby.h
-              find /tmp/dobby-build -name "libdobby.a" -exec cp {} lib/libdobby.a \;
-            fi
+            git clone --depth 1 https://github.com/jmpews/Dobby.git /tmp/dobby-src
+            cmake -S /tmp/dobby-src -B /tmp/dobby-build \
+              -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+              -DDOBBY_BUILD_EXAMPLE=OFF \
+              -DDOBBY_BUILD_TEST=OFF
+            cmake --build /tmp/dobby-build --config Release -j4
+            cp /tmp/dobby-src/include/dobby.h include/dobby.h
+            find /tmp/dobby-build -name "libdobby.a" -exec cp {} lib/libdobby.a \;
           fi
 
       - name: Compile XSamkokMod.dylib
@@ -51,8 +44,10 @@ jobs:
             -I./include \
             -L./lib \
             -ldobby \
-            -framework UIKit \
             -framework Foundation \
+            -framework UIKit \
+            -framework CoreGraphics \
+            -framework QuartzCore \
             -framework JavaScriptCore \
             -install_name @executable_path/Frameworks/XSamkokMod.dylib \
             Tweak.mm \
