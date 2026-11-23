@@ -1,9 +1,9 @@
-// language: Objective-C++, file: Tweak.mm, runtime: iOS ARM64, target: com.global.snmj.ios (v1.0.173)
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <JavaScriptCore/JavaScriptCore.h>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <mutex>
 #include "dobby.h"
 
