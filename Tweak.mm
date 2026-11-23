@@ -1,8 +1,10 @@
+// language: Objective-C++, file: Tweak.mm, runtime: iOS ARM64, target: com.global.snmj.ios (v1.0.173)
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <QuartzCore/QuartzCore.h>
-#import <JavaScriptCore/JavaScriptCore.h>
+#import <mach-o/dyld.h>
+#import <mach-o/nlist.h>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -10,7 +12,7 @@
 #include "dobby.h"
 
 // ============================================================================
-// PHẦN 1: PAYLOAD JAVASCRIPT CAN THIỆP SÂU COCOS CREATOR 3.X
+// PHẦN 1: PAYLOAD JS CHẠY TRỰC TIẾP TRONG COCOS SCRIPT ENGINE (SE::SCRIPTENGINE)
 // ============================================================================
 static const char* kXSamkokEnginePayload = R"JS(
 (function() {
@@ -18,65 +20,80 @@ static const char* kXSamkokEnginePayload = R"JS(
     window.__xsamkok_master_loaded = true;
 
     window.__modCfg = {
-        dmgMult: 1.0,         // 1x -> 100x
-        speedScale: 1.0,      // 1x -> 8x
-        godMode: false,       // Bất tử phe ta
-        oneHitEnemy: false,   // 1 hit địch
-        autoSkip: false,      // Tự kích hoạt skip trận
-        autoPush: false,      // Tự leo ải / leo tháp
-        unlockSweep: false,   // Mở khóa nút càn quét / khiêu chiến
-        unlockVip: false,     // VIP 15 & đặc quyền client
-        netLog: false         // Log WebSocket
+        dmgMult: 1.0,
+        speedScale: 1.0,
+        godMode: false,
+        oneHitEnemy: false,
+        autoSkip: false,
+        autoPush: false,
+        unlockSweep: false,
+        unlockVip: false,
+        netLog: false
     };
 
     window.__sysMods = {};
 
-    // 1. Chặn System.register ngay lúc khởi động để chiếm quyền module & bật DEBUG/DEV
-    const hookSystemBoot = () => {
-        if (typeof System === 'undefined' || !System.register) {
-            setTimeout(hookSystemBoot, 15);
-            return;
-        }
-        const origRegister = System.register.bind(System);
-        System.register = function(name, deps, declare) {
-            if (typeof name === 'string') {
-                if (name.endsWith('/env')) {
-                    const origDec = declare;
-                    declare = function(_export, _context) {
-                        return origDec(function(k, v) {
-                            if (k === 'DEBUG' || k === 'DEV') v = true;
-                            return _export(k, v);
-                        }, _context);
-                    };
-                }
-
-                const origDec = declare;
-                declare = function(_export, _context) {
-                    const captured = {};
-                    const proxyExp = function(k, v) {
-                        if (typeof k === 'string') captured[k] = v;
-                        else if (k && typeof k === 'object') Object.assign(captured, k);
-                        return _export(k, v);
-                    };
-                    const res = origDec(proxyExp, _context);
-                    window.__sysMods[name] = captured;
-
-                    if (res && typeof res.execute === 'function') {
-                        const origExec = res.execute.bind(res);
-                        res.execute = function() {
-                            const r = origExec();
-                            patchModuleDeep(name, captured);
-                            return r;
+    // 1. Hook System.register ngay lúc bundle khởi chạy (nếu kịp) + quét System.entries (nếu inject muộn)
+    const hookSystem = () => {
+        if (typeof System === 'undefined') return;
+        if (System.register && !System.__china_reg) {
+            System.__china_reg = true;
+            const origRegister = System.register.bind(System);
+            System.register = function(name, deps, declare) {
+                if (typeof name === 'string') {
+                    if (name.endsWith('/env')) {
+                        const origDec = declare;
+                        declare = function(_export, _context) {
+                            return origDec(function(k, v) {
+                                if (k === 'DEBUG' || k === 'DEV') v = true;
+                                return _export(k, v);
+                            }, _context);
                         };
                     }
-                    return res;
-                };
+                    const origDec = declare;
+                    declare = function(_export, _context) {
+                        const captured = {};
+                        const proxyExp = function(k, v) {
+                            if (typeof k === 'string') captured[k] = v;
+                            else if (k && typeof k === 'object') Object.assign(captured, k);
+                            return _export(k, v);
+                        };
+                        const res = origDec(proxyExp, _context);
+                        window.__sysMods[name] = captured;
+                        if (res && typeof res.execute === 'function') {
+                            const origExec = res.execute.bind(res);
+                            res.execute = function() {
+                                const r = origExec();
+                                patchModuleDeep(name, captured);
+                                return r;
+                            };
+                        }
+                        return res;
+                    };
+                }
+                return origRegister(name, deps, declare);
+            };
+        }
+
+        // Quét các module đã đăng ký sẵn trong SystemJS (trường hợp inject sau khi boot)
+        try {
+            const symKeys = Object.getOwnPropertySymbols(System);
+            for (const s of symKeys) {
+                const regMap = System[s];
+                if (regMap && typeof regMap === 'object') {
+                    for (const modUrl of Object.keys(regMap)) {
+                        const entry = regMap[modUrl];
+                        if (entry && entry.C && !entry.C.__china_scanned) {
+                            entry.C.__china_scanned = true;
+                            window.__sysMods[modUrl] = entry.C;
+                            patchModuleDeep(modUrl, entry.C);
+                        }
+                    }
+                }
             }
-            return origRegister(name, deps, declare);
-        };
+        } catch (e) {}
     };
 
-    // Phân tách phe ta vs phe địch
     const isAlly = (u) => {
         if (!u || typeof u !== 'object') return false;
         if (typeof u.isEnemy === 'boolean') return !u.isEnemy;
@@ -88,7 +105,6 @@ static const char* kXSamkokEnginePayload = R"JS(
         return false;
     };
 
-    // Bọc setter HP trực tiếp trên từng đơn vị chiến đấu
     const wrapUnitHp = (unit) => {
         if (!unit || typeof unit !== 'object' || unit.__hp_hooked) return;
         unit.__hp_hooked = true;
@@ -127,7 +143,6 @@ static const char* kXSamkokEnginePayload = R"JS(
         }
     };
 
-    // 2. Can thiệp prototype của các module chiến đấu & đặc quyền
     const patchModuleDeep = (modName, exportsObj) => {
         const combatTargets = [
             'enemybase.ts', 'armyctrl.ts', 'warctrl.ts', 'warjsctrl.ts',
@@ -171,7 +186,6 @@ static const char* kXSamkokEnginePayload = R"JS(
             }
         }
 
-        // VIP & Đặc quyền (privilegemdl.ts & playermdl.ts)
         if (modName.endsWith('/privilegemdl.ts')) {
             for (const k of Object.keys(exportsObj)) {
                 const proto = exportsObj[k]?.prototype || exportsObj[k];
@@ -204,10 +218,8 @@ static const char* kXSamkokEnginePayload = R"JS(
         }
     };
 
-    hookSystemBoot();
-
-    // 3. Speedhack Scheduler + Spine Skeleton
-    const maintainSpeedAndNet = () => {
+    const maintainEngine = () => {
+        hookSystem();
         if (typeof cc !== 'undefined' && cc.director) {
             const sch = cc.director.getScheduler();
             if (sch && !sch.__spd_hooked) {
@@ -241,7 +253,6 @@ static const char* kXSamkokEnginePayload = R"JS(
         }
     };
 
-    // 4. Quét Scene Graph cho Auto Skip, Auto Đẩy Ải & Mở khóa nút Càn quét
     const scanSceneControls = () => {
         if (typeof cc === 'undefined' || !cc.director) return;
         const scene = cc.director.getScene();
@@ -295,7 +306,6 @@ static const char* kXSamkokEnginePayload = R"JS(
         walk(canvas);
     };
 
-    // 5. Hàm mở/ẩn GM Panel gốc của game (assets/bcgmst/index.js)
     window.__toggleOfficialGM = () => {
         if (typeof cc === 'undefined' || !cc.assetManager) return;
         cc.assetManager.loadBundle('bcgmst', (err, bundle) => {
@@ -319,94 +329,118 @@ static const char* kXSamkokEnginePayload = R"JS(
     };
 
     setInterval(() => {
-        maintainSpeedAndNet();
+        maintainEngine();
         scanSceneControls();
     }, 500);
 })();
 )JS";
 
 // ============================================================================
-// PHẦN 2: JAVASCRIPTCORE HOOK & HÀNG ĐỢI LỆNH AN TOÀN LUỒNG (THREAD-SAFE BRIDGE)
+// PHẦN 2: QUÉT MACH-O & HOOK TRỰC TIẾP SE::SCRIPTENGINE::EVALSTRING CỦA COCOS
 // ============================================================================
-static JSValueRef (*orig_JSEvaluateScript)(
-    JSContextRef ctx,
-    JSStringRef script,
-    JSObjectRef thisObject,
-    JSStringRef sourceURL,
-    int startingLineNumber,
-    JSValueRef* exception
-) = nullptr;
-
-static bool g_jsBooted = false;
+// Signature C++ trên ARM64 iOS của se::ScriptEngine::evalString(const char* script, ssize_t length, se::Value* ret, const char* fileName)
+typedef bool (*EvalStringFn)(void* thisPtr, const char* script, long length, void* ret, const char* fileName);
+static EvalStringFn orig_evalString = nullptr;
+static void* g_scriptEngineInstance = nullptr;
+static bool g_masterInjected = false;
 static std::mutex g_cmdMutex;
-static std::vector<std::string> g_pendingJsCmds;
+static std::vector<std::string> g_cmdQueue;
 
 static void EnqueueJSCommand(const std::string& jsCode) {
     std::lock_guard<std::mutex> lock(g_cmdMutex);
-    g_pendingJsCmds.push_back(jsCode);
+    g_cmdQueue.push_back(jsCode);
 }
 
-// Chèn kiểm tra hàng đợi lệnh vào frame của JS để tránh crash khác luồng (UIKit MainThread vs JS Thread)
-static const char* kBridgePollerJS = R"JS(
-(function() {
-    if (window.__bridge_poller) return;
-    window.__bridge_poller = true;
-})();
-)JS";
-
-JSValueRef hook_JSEvaluateScript(
-    JSContextRef ctx,
-    JSStringRef script,
-    JSObjectRef thisObject,
-    JSStringRef sourceURL,
-    int startingLineNumber,
-    JSValueRef* exception
-) {
-    JSValueRef res = orig_JSEvaluateScript(ctx, script, thisObject, sourceURL, startingLineNumber, exception);
-
-    if (!g_jsBooted && sourceURL != nullptr) {
-        size_t maxLen = JSStringGetMaximumUTF8CStringSize(sourceURL);
-        std::string url(maxLen, '\0');
-        JSStringGetUTF8CString(sourceURL, &url[0], maxLen);
-
-        if (url.find("application.js") != std::string::npos || url.find("system.bundle.js") != std::string::npos) {
-            g_jsBooted = true;
-            JSStringRef s = JSStringCreateWithUTF8CString(kXSamkokEnginePayload);
-            JSStringRef u = JSStringCreateWithUTF8CString("xsamkok_master.js");
-            orig_JSEvaluateScript(ctx, s, nullptr, u, 1, nullptr);
-            JSStringRelease(s);
-            JSStringRelease(u);
-        }
+bool hook_evalString(void* thisPtr, const char* script, long length, void* ret, const char* fileName) {
+    if (thisPtr != nullptr) {
+        g_scriptEngineInstance = thisPtr;
     }
 
-    // Thực thi các lệnh từ UIKit Menu ngay trên luồng JS hiện tại
-    if (g_jsBooted && ctx != nullptr) {
-        std::vector<std::string> cmdsToRun;
+    bool result = orig_evalString(thisPtr, script, length, ret, fileName);
+
+    // Bơm payload chính ngay lần evalString đầu tiên của engine Cocos
+    if (!g_masterInjected && thisPtr != nullptr) {
+        g_masterInjected = true;
+        orig_evalString(thisPtr, kXSamkokEnginePayload, (long)strlen(kXSamkokEnginePayload), nullptr, "xsamkok_master.js");
+    }
+
+    // Xả toàn bộ hàng đợi lệnh từ UIKit Menu vào ngay luồng JS đang chạy
+    if (g_masterInjected && thisPtr != nullptr) {
+        std::vector<std::string> cmds;
         {
             std::lock_guard<std::mutex> lock(g_cmdMutex);
-            if (!g_pendingJsCmds.empty()) {
-                cmdsToRun.swap(g_pendingJsCmds);
+            if (!g_cmdQueue.empty()) {
+                cmds.swap(g_cmdQueue);
             }
         }
-        for (const auto& cmd : cmdsToRun) {
-            JSStringRef s = JSStringCreateWithUTF8CString(cmd.c_str());
-            orig_JSEvaluateScript(ctx, s, nullptr, nullptr, 1, nullptr);
-            JSStringRelease(s);
+        for (const auto& c : cmds) {
+            orig_evalString(thisPtr, c.c_str(), (long)c.size(), nullptr, "ui_cmd.js");
         }
     }
 
-    return res;
+    return result;
+}
+
+// Quét bảng symbol Mach-O của binary chính để tìm _ZN2se12ScriptEngine10evalStringEPKclPNS_5ValueES2_
+static void* FindCocosEvalStringSymbol() {
+    // 1. Thử tra trực tiếp bằng DobbySymbolResolver trên main executable (image_name = nullptr)
+    const char* mangledNames[] = {
+        "_ZN2se12ScriptEngine10evalStringEPKclPNS_5ValueES2_",
+        "_ZN2se12ScriptEngine10evalStringEPKciPNS_5ValueES2_",
+        "__ZN2se12ScriptEngine10evalStringEPKclPNS_5ValueES2_"
+    };
+    for (const char* symName : mangledNames) {
+        void* addr = DobbySymbolResolver(nullptr, symName);
+        if (addr != nullptr) return addr;
+    }
+
+    // 2. Fallback: duyệt nlist trong Mach-O header của image 0 (binary chính)
+    const struct mach_header_64* header = (const struct mach_header_64*)_dyld_get_image_header(0);
+    intptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    if (!header || header->magic != MH_MAGIC_64) return nullptr;
+
+    const struct load_command* cmd = (const struct load_command*)((uintptr_t)header + sizeof(struct mach_header_64));
+    const struct symtab_command* symtab = nullptr;
+    const struct segment_command_64* linkedit = nullptr;
+
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if (cmd->cmd == LC_SYMTAB) {
+            symtab = (const struct symtab_command*)cmd;
+        } else if (cmd->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64* seg = (const struct segment_command_64*)cmd;
+            if (strcmp(seg->segname, "__LINKEDIT") == 0) {
+                linkedit = seg;
+            }
+        }
+        cmd = (const struct load_command*)((uintptr_t)cmd + cmd->cmdsize);
+    }
+
+    if (!symtab || !linkedit) return nullptr;
+
+    uintptr_t linkeditBase = (uintptr_t)slide + linkedit->vmaddr - linkedit->fileoff;
+    const struct nlist_64* syms = (const struct nlist_64*)(linkeditBase + symtab->symoff);
+    const char* strtab = (const char*)(linkeditBase + symtab->stroff);
+
+    for (uint32_t i = 0; i < symtab->nsyms; i++) {
+        uint32_t strx = syms[i].n_un.n_strx;
+        if (strx == 0) continue;
+        const char* name = strtab + strx;
+        if (strstr(name, "ScriptEngine") && strstr(name, "evalString") && syms[i].n_value != 0) {
+            return (void*)(syms[i].n_value + slide);
+        }
+    }
+    return nullptr;
 }
 
 // ============================================================================
 // PHẦN 3: GIAO DIỆN FLOATING MENU NATIVE UIKIT (KÉO THẢ + SLIDER + TOGGLE)
 // ============================================================================
 @interface SheepctMenuController : NSObject
-@property (nonatomic, strong) UIWindow *overlayWindow;
 @property (nonatomic, strong) UIButton *floatingBtn;
 @property (nonatomic, strong) UIView *menuPanel;
 @property (nonatomic, strong) UILabel *dmgLabel;
 @property (nonatomic, strong) UILabel *spdLabel;
+@property (nonatomic, strong) UILabel *statusLabel;
 + (instancetype)sharedInstance;
 - (void)setupUI;
 @end
@@ -439,7 +473,6 @@ JSValueRef hook_JSEvaluateScript(
     UIWindow *mainWin = [self getKeyWindow];
     if (!mainWin || self.floatingBtn) return;
 
-    // 1. Nút nổi tròn góc trái (kéo thả tự do)
     self.floatingBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     self.floatingBtn.frame = CGRectMake(20, 100, 52, 52);
     self.floatingBtn.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.12 alpha:0.92];
@@ -455,9 +488,8 @@ JSValueRef hook_JSEvaluateScript(
     [self.floatingBtn addGestureRecognizer:pan];
     [mainWin addSubview:self.floatingBtn];
 
-    // 2. Bảng điều khiển chính
     CGFloat panelW = 300;
-    CGFloat panelH = 440;
+    CGFloat panelH = 465;
     CGFloat screenW = mainWin.bounds.size.width;
     CGFloat screenH = mainWin.bounds.size.height;
 
@@ -469,12 +501,18 @@ JSValueRef hook_JSEvaluateScript(
     self.menuPanel.hidden = YES;
     [mainWin addSubview:self.menuPanel];
 
-    // Header
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 10, panelW - 60, 28)];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 8, panelW - 60, 22)];
     title.text = @"X-SAMKOK v1.0.173 | SHEEPCT";
-    title.font = [UIFont boldSystemFontOfSize:14];
+    title.font = [UIFont boldSystemFontOfSize:13.5];
     title.textColor = [UIColor colorWithRed:0.0 green:0.95 blue:0.55 alpha:1.0];
     [self.menuPanel addSubview:title];
+
+    // Dòng báo trạng thái kết nối Cocos JS Engine để kiểm tra ngay lúc mở menu
+    self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(15, 28, panelW - 60, 16)];
+    self.statusLabel.font = [UIFont systemFontOfSize:11];
+    self.statusLabel.textColor = g_masterInjected ? [UIColor systemGreenColor] : [UIColor systemYellowColor];
+    self.statusLabel.text = g_masterInjected ? @"JS Engine: ĐÃ KẾT NỐI (ACTIVE)" : @"JS Engine: ĐANG CHỜ HOOK...";
+    [self.menuPanel addSubview:self.statusLabel];
 
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     closeBtn.frame = CGRectMake(panelW - 40, 8, 30, 30);
@@ -483,13 +521,12 @@ JSValueRef hook_JSEvaluateScript(
     [closeBtn addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
     [self.menuPanel addSubview:closeBtn];
 
-    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(12, 44, panelW - 24, panelH - 54)];
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(12, 48, panelW - 24, panelH - 58)];
     scroll.showsVerticalScrollIndicator = YES;
     [self.menuPanel addSubview:scroll];
 
     CGFloat y = 5;
 
-    // Slider 1: Nhân Sát Thương (1x -> 100x)
     self.dmgLabel = [[UILabel alloc] initWithFrame:CGRectMake(4, y, panelW - 32, 20)];
     self.dmgLabel.text = @"Nhân Sát Thương Phe Ta: 1x";
     self.dmgLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
@@ -506,7 +543,6 @@ JSValueRef hook_JSEvaluateScript(
     [scroll addSubview:dmgSlider];
     y += 34;
 
-    // Slider 2: Tốc Độ Game (1x -> 8x)
     self.spdLabel = [[UILabel alloc] initWithFrame:CGRectMake(4, y, panelW - 32, 20)];
     self.spdLabel.text = @"Tốc Độ Trận & Game: 1.0x";
     self.spdLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
@@ -523,7 +559,6 @@ JSValueRef hook_JSEvaluateScript(
     [scroll addSubview:spdSlider];
     y += 38;
 
-    // Các nút gạt Switch
     NSArray *switches = @[
         @{@"title": @"Bất Tử Phe Ta (God Mode)", @"tag": @1},
         @{@"title": @"One-Hit Địch (1 Chạm Chết)", @"tag": @2},
@@ -556,7 +591,6 @@ JSValueRef hook_JSEvaluateScript(
         y += 42;
     }
 
-    // Nút bấm mở GM Panel gốc của game (assets/bcgmst/index.js)
     UIButton *gmBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     gmBtn.frame = CGRectMake(0, y + 4, panelW - 24, 38);
     gmBtn.backgroundColor = [UIColor colorWithRed:0.85 green:0.55 blue:0.1 alpha:1.0];
@@ -573,6 +607,8 @@ JSValueRef hook_JSEvaluateScript(
 
 - (void)toggleMenu {
     self.menuPanel.hidden = !self.menuPanel.hidden;
+    self.statusLabel.textColor = g_masterInjected ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+    self.statusLabel.text = g_masterInjected ? @"JS Engine: ĐÃ KẾT NỐI (ACTIVE)" : @"JS Engine: CHƯA HOOK ĐƯỢC SYMBOL";
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
@@ -621,14 +657,12 @@ JSValueRef hook_JSEvaluateScript(
 // ============================================================================
 __attribute__((constructor))
 static void InitXSamkokMasterDylib() {
-    // 1. Hook JavaScriptCore JSEvaluateScript
-    void *sym = DobbySymbolResolver("JavaScriptCore", "JSEvaluateScript");
-    if (sym != nullptr) {
-        DobbyHook(sym, (void *)hook_JSEvaluateScript, (void **)&orig_JSEvaluateScript);
+    void* evalAddr = FindCocosEvalStringSymbol();
+    if (evalAddr != nullptr) {
+        DobbyHook(evalAddr, (void*)hook_evalString, (void**)&orig_evalString);
     }
 
-    // 2. Khởi tạo UIKit Menu sau khi cửa sổ game hiển thị ổn định (5 giây)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[SheepctMenuController sharedInstance] setupUI];
     });
 }
