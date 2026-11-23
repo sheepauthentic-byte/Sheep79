@@ -1,0 +1,47 @@
+# language: YAML, file: .github/workflows/build.yml
+name: Build XSamkokMod Dylib
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-dylib:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Theos & iOS SDK
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          mkdir -p $HOME/theos/sdks
+          curl -L https://github.com/xybp888/iOS-SDKs/releases/download/iOS-SDKs/iPhoneOS16.5.sdk.tar.xz -o sdk.tar.xz
+          tar -xf sdk.tar.xz -C $HOME/theos/sdks
+          rm sdk.tar.xz
+
+      - name: Install Procursus ldid
+        run: |
+          brew install ldid || true
+          curl -L https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 -o /usr/local/bin/ldid || true
+          chmod +x /usr/local/bin/ldid || true
+
+      - name: Build Dylib with Theos (make all)
+        env:
+          THEOS: ${{ runner.home }}/theos
+        run: |
+          make all
+
+      - name: Collect & Sign Dylib
+        run: |
+          mkdir -p output
+          find .theos/obj -name "XSamkokMod.dylib" -exec cp {} output/XSamkokMod.dylib \;
+          ldid -S output/XSamkokMod.dylib
+
+      - name: Upload XSamkokMod.dylib Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XSamkokMod-arm64
+          path: output/XSamkokMod.dylib
