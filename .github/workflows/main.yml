@@ -13,31 +13,53 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Theos & Official iOS SDKs
+      - name: Prepare Dobby (iOS ARM64)
         run: |
-          git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          rm -rf $HOME/theos/sdks
-          git clone --depth 1 https://github.com/theos/sdks.git $HOME/theos/sdks
-
-      - name: Install Procursus ldid
-        run: |
-          brew install ldid || true
-          if ! command -v ldid &> /dev/null; then
-            curl -L https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 -o /usr/local/bin/ldid
-            chmod +x /usr/local/bin/ldid
+          mkdir -p include lib
+          if [ ! -f "include/dobby.h" ] || [ ! -f "lib/libdobby.a" ]; then
+            curl -L https://github.com/jmpews/Dobby/releases/latest/download/dobby-ios-all.tar.gz -o dobby.tar.gz || true
+            if tar -tzf dobby.tar.gz >/dev/null 2>&1; then
+              tar -xzf dobby.tar.gz -C /tmp
+              find /tmp -name "dobby.h" -exec cp {} include/dobby.h \;
+              find /tmp -name "libdobby.a" -exec cp {} lib/libdobby.a \;
+            else
+              git clone --depth 1 https://github.com/jmpews/Dobby.git /tmp/dobby-src
+              cmake -S /tmp/dobby-src -B /tmp/dobby-build \
+                -DCMAKE_SYSTEM_NAME=iOS \
+                -DCMAKE_OSX_ARCHITECTURES=arm64 \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+                -DDOBBY_BUILD_EXAMPLE=OFF \
+                -DDOBBY_BUILD_TEST=OFF
+              cmake --build /tmp/dobby-build --config Release -j4
+              cp /tmp/dobby-src/include/dobby.h include/dobby.h
+              find /tmp/dobby-build -name "libdobby.a" -exec cp {} lib/libdobby.a \;
+            fi
           fi
 
-      - name: Build Dylib with Theos
-        env:
-          THEOS: ${{ runner.home }}/theos
-        run: |
-          make all
-
-      - name: Collect & Sign Dylib
+      - name: Compile XSamkokMod.dylib (Native Xcode Clang)
         run: |
           mkdir -p output
-          find .theos/obj -name "XSamkokMod.dylib" -exec cp {} output/XSamkokMod.dylib \;
-          ldid -S output/XSamkokMod.dylib
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang++ -dynamiclib \
+            -arch arm64 \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=13.0 \
+            -std=c++17 \
+            -fobjc-arc \
+            -O2 \
+            -I./include \
+            -L./lib \
+            -ldobby \
+            -framework UIKit \
+            -framework Foundation \
+            -framework JavaScriptCore \
+            -install_name @executable_path/Frameworks/XSamkokMod.dylib \
+            Tweak.mm \
+            -o output/XSamkokMod.dylib
+
+      - name: Ad-hoc Sign Dylib
+        run: |
+          codesign -f -s - output/XSamkokMod.dylib
 
       - name: Upload XSamkokMod.dylib Artifact
         uses: actions/upload-artifact@v4
