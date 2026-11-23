@@ -1,4 +1,3 @@
-# language: YAML, file: .github/workflows/build.yml
 name: Build XSamkokMod Dylib
 
 on:
@@ -14,21 +13,21 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Theos & iOS SDK
+      - name: Setup Theos & Official iOS SDKs
         run: |
           git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          mkdir -p $HOME/theos/sdks
-          curl -L https://github.com/xybp888/iOS-SDKs/releases/download/iOS-SDKs/iPhoneOS16.5.sdk.tar.xz -o sdk.tar.xz
-          tar -xf sdk.tar.xz -C $HOME/theos/sdks
-          rm sdk.tar.xz
+          rm -rf $HOME/theos/sdks
+          git clone --depth 1 https://github.com/theos/sdks.git $HOME/theos/sdks
 
       - name: Install Procursus ldid
         run: |
           brew install ldid || true
-          curl -L https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 -o /usr/local/bin/ldid || true
-          chmod +x /usr/local/bin/ldid || true
+          if ! command -v ldid &> /dev/null; then
+            curl -L https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 -o /usr/local/bin/ldid
+            chmod +x /usr/local/bin/ldid
+          fi
 
-      - name: Build Dylib with Theos (make all)
+      - name: Build Dylib with Theos
         env:
           THEOS: ${{ runner.home }}/theos
         run: |
